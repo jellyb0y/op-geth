@@ -9,7 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
-	"github.com/ethereum/go-ethereum/core/vm/tracing/tracers"
+	"github.com/ethereum/go-ethereum/eth/tracers"
 )
 
 // ---------- JSON форматы результата (порядок полей соответствует JS callTracer) ----------
@@ -87,8 +87,7 @@ func newCallLogsTracer() tracers.Tracer {
 }
 
 func init() {
-	// имя, под которым потом вызываем через debug/trace: "call-logs"
-	register("callLogsTracer", newCallLogsTracer)
+	tracers.DefaultDirectory.Register("callLogsTracer", newCallLogsTracer, false)
 }
 
 // ---------- хуки ----------
