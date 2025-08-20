@@ -8,8 +8,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // ---------- JSON форматы результата (порядок полей соответствует JS callTracer) ----------
@@ -47,7 +49,6 @@ type frame struct {
 // ---------- сам трейсер ----------
 
 type callLogsTracer struct {
-	hooks *tracing.Hooks
 	// стек активных фреймов
 	stack []*frame
 	// вершина результата (outermost call)
@@ -56,34 +57,21 @@ type callLogsTracer struct {
 	vmc *tracing.VMContext
 }
 
-func (t *callLogsTracer) Hooks() *tracing.Hooks { return t.hooks }
-
-// GetResult сериализует итог
-func (t *callLogsTracer) GetResult() (json.RawMessage, error) {
-	if t.root == nil {
-		// Пустой ответ вместо null, чтобы RPC-клиенты не спотыкались
-		return json.Marshal(call{})
-	}
-	return json.Marshal(t.root)
-}
-
-// Stop — сигнал тайм-аута/остановки
-func (t *callLogsTracer) Stop(err error) {
-	// Ничего: мы и так фиксируем ошибки на Exit/Fault
-}
-
 // ---------- конструктор и регистрация ----------
 
-func newCallLogsTracer() tracers.Tracer {
+func newCallLogsTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *params.ChainConfig) (*tracers.Tracer, error) {
 	tr := &callLogsTracer{}
-	tr.hooks = &tracing.Hooks{
-		OnTxStart: tr.onTxStart,
-		OnEnter:   tr.onEnter,
-		OnExit:    tr.onExit,
-		OnFault:   tr.onFault,
-		OnOpcode:  tr.onOpcode, // для LOG0..LOG4 и SELFDESTRUCT
-	}
-	return tr
+	return &tracers.Tracer{
+		Hooks: &tracing.Hooks{
+			OnTxStart: tr.OnTxStart,
+			OnEnter:   tr.OnEnter,
+			OnExit:    tr.OnExit,
+			OnFault:   tr.OnFault,
+			OnOpcode:  tr.OnOpcode, // для LOG0..LOG4 и SELFDESTRUCT
+		},
+		GetResult: tr.GetResult,
+		Stop:      tr.Stop,
+	}, nil
 }
 
 func init() {
@@ -92,13 +80,13 @@ func init() {
 
 // ---------- хуки ----------
 
-func (t *callLogsTracer) onTxStart(vmc *tracing.VMContext, _ *tracing.BlockEvent, _ common.Address) {
+func (t *callLogsTracer) OnTxStart(vmc *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	t.vmc = vmc
 	t.stack = t.stack[:0]
 	t.root = nil
 }
 
-func (t *callLogsTracer) onEnter(depth int, typ byte, from, to common.Address, input []byte, gas uint64, value *big.Int) {
+func (t *callLogsTracer) OnEnter(depth int, typ byte, from, to common.Address, input []byte, gas uint64, value *big.Int) {
 	// Собираем новый фрейм
 	f := &frame{
 		depth: depth,
@@ -130,7 +118,7 @@ func (t *callLogsTracer) onEnter(depth int, typ byte, from, to common.Address, i
 	t.stack = append(t.stack, f)
 }
 
-func (t *callLogsTracer) onExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
+func (t *callLogsTracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
 	if len(t.stack) == 0 {
 		return
 	}
@@ -170,7 +158,7 @@ func (t *callLogsTracer) onExit(depth int, output []byte, gasUsed uint64, err er
 	}
 }
 
-func (t *callLogsTracer) onFault(depth int, op byte, _ uint64, _ uint64, _ tracing.OpContext, _ []byte, err error) {
+func (t *callLogsTracer) OnFault(pc uint64, op byte, gas uint64, cost uint64, scope tracing.OpContext, depth int, err error) {
 	// Ошибка на opcode уровне до Exit — пометим активный фрейм
 	if len(t.stack) == 0 {
 		return
@@ -181,7 +169,7 @@ func (t *callLogsTracer) onFault(depth int, op byte, _ uint64, _ uint64, _ traci
 	}
 }
 
-func (t *callLogsTracer) onOpcode(pc uint64, op byte, gas uint64, cost uint64, scope tracing.OpContext, rdata []byte, depth int, _ error) {
+func (t *callLogsTracer) OnOpcode(pc uint64, op byte, gas uint64, cost uint64, scope tracing.OpContext, rdata []byte, depth int, err error) {
 	code := vm.OpCode(op)
 
 	// Логи: LOG0..LOG4
@@ -238,8 +226,9 @@ func (t *callLogsTracer) onOpcode(pc uint64, op byte, gas uint64, cost uint64, s
 		var val *hexutil.Big
 		if t.vmc != nil && t.vmc.StateDB != nil {
 			b := t.vmc.StateDB.GetBalance(from)
+			// Конвертируем uint256.Int в hexutil.Big
 			hb := (*hexutil.Big)(new(hexutil.Big))
-			*hb = hexutil.Big(*b)
+			*hb = hexutil.Big(*b.ToBig())
 			val = hb
 		}
 
@@ -253,4 +242,18 @@ func (t *callLogsTracer) onOpcode(pc uint64, op byte, gas uint64, cost uint64, s
 		parent := t.stack[len(t.stack)-1]
 		parent.Calls = append(parent.Calls, sub)
 	}
+}
+
+// GetResult сериализует итог
+func (t *callLogsTracer) GetResult() (json.RawMessage, error) {
+	if t.root == nil {
+		// Пустой ответ вместо null, чтобы RPC-клиенты не спотыкались
+		return json.Marshal(call{})
+	}
+	return json.Marshal(t.root)
+}
+
+// Stop — сигнал тайм-аута/остановки
+func (t *callLogsTracer) Stop(err error) {
+	// Ничего: мы и так фиксируем ошибки на Exit/Fault
 }
