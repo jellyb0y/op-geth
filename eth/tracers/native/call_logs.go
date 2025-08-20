@@ -186,6 +186,25 @@ func (t *callLogsTracer) OnOpcode(pc uint64, op byte, gas uint64, cost uint64, s
 		mSizeU := stack[top-n-0].Uint64()
 		mStartU := stack[top-n-1].Uint64()
 
+		// Валидация значений для предотвращения выхода за границы памяти
+		// Проверяем, что значения разумны и не превышают размер памяти
+		if mSizeU > uint64(len(mem)) || mStartU > uint64(len(mem)) {
+			// Некорректные значения - пропускаем этот лог
+			return
+		}
+		
+		// Проверяем, что не произойдет переполнение при сложении
+		if mStartU > uint64(len(mem)) - mSizeU {
+			// Выход за границы памяти - пропускаем этот лог
+			return
+		}
+
+		// Дополнительная защита от переполнения при конвертации в int
+		if mSizeU > 1<<31-1 || mStartU > 1<<31-1 {
+			// Слишком большие значения для int - пропускаем этот лог
+			return
+		}
+
 		var data hexutil.Bytes
 		if int(mStartU)+int(mSizeU) <= len(mem) {
 			data = hexutil.Bytes(append([]byte(nil), mem[mStartU:mStartU+mSizeU]...))
